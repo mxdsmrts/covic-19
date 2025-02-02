@@ -4,7 +4,7 @@ author: "Maxime Desmarets -- CIC 1431, CHU Besançon, France"
 date: "`r format(Sys.time(), '%d %B %Y')`"
 output:
   word_document: 
-    reference_docx: ~/DATA/my-style.docx
+    reference_docx: ../commun/my-style.docx
     toc: true
   html_document: default
 ---
@@ -12,7 +12,7 @@ output:
 ```{r setup, include = FALSE}
 knitr::opts_chunk$set(echo = FALSE, message = FALSE)
 
-source("~/DATA/COVIC-19/PROGRAMMES/COVIC-19 interim analysis setup.R")
+source("~/DATA/COVIC-19/rapports/COVIC-19 interim analysis setup.R")
 
 ```
 
