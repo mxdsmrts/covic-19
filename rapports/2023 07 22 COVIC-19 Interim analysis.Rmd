@@ -1,0 +1,246 @@
+---
+title: "COVIC-19 interim analysis for sample size reestimation –– report"
+author: "Maxime Desmarets -- CIC 1431, CHU Besançon, France"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  word_document: 
+    reference_docx: ~/DATA/my-style.docx
+    toc: true
+  html_document: default
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+
+source("~/DATA/COVIC-19/PROGRAMMES/COVIC-19 interim analysis setup.R")
+
+```
+
+\newpage
+
+# Descriptive statistics
+
+## Table 1 - Study sample description
+
+```{r table 1, warning=FALSE}
+table1.data <- covic19.data %>% select(ARM, AGE_V, SEX, BLOODGRP, IN07:IN08C1, COVID19_VAC, nb_vacdose,
+                                       days_cov_rando, days_first_pcr_rando, days_lastvacdose_rando,
+                                       days_last_pcr_rando, days_rando_plasma, D1_PCRASS, D1_PCRASSRES,
+                                       D1_PCRASSCT_V, D1_PCRASSTYP1, OMICRONTYP, D1_IGAASS, D1_IGAASSRATIO_V,
+                                       D1_IGGASS, D1_IGGASSRATIO_V, ANTIVIRAL, PLASMA_NB )
+
+table1 <- table1.data %>%
+  tbl_summary(by = "ARM",
+              type = c(all_continuous() ~ "continuous2",
+                       c(days_cov_rando, days_first_pcr_rando, days_last_pcr_rando, days_rando_plasma,
+                       D1_IGAASSRATIO_V, D1_IGGASSRATIO_V) ~ "continuous2"),
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) %>%
+  bold_labels()
+
+table1
+```
+
+## Table 2 - Medications classes
+```{r table 2 medication classes}
+table2 <- t9_cmtab %>% select(RANDOMIZATION_R1, `Medication class`) %>%
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) %>%
+  bold_labels()
+
+table2
+```
+
+## Table 3 - Medications
+```{r table 3 medications}
+# table3 <- t9_cmtab %>% filter(!is.na(`Medication class`)) %>% select(RANDOMIZATION_R1, `Medication`) %>%
+#   tbl_summary(by = "RANDOMIZATION_R1",
+#               type = all_continuous() ~ "continuous2",
+#               statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+#                                                     "{min}, {max}"),
+#                                all_categorical() ~ "{n} ({p}%)")) %>%
+#   bold_labels()
+
+
+table3 <- t9_cmtab %>% filter(!is.na(`Medication class`)) %>% select(RANDOMIZATION_R1, `Medication class`, `Medication`) %>%
+  tbl_strata(strata = `Medication class`,
+             .tbl_fun =
+      ~ .x %>%
+        tbl_summary(by = "RANDOMIZATION_R1") %>%
+        add_n() %>%
+        add_overall() %>%
+        bold_labels(),
+      .combine_with = "tbl_stack")
+
+table3
+```
+
+
+\newpage
+
+# Primary endpoint
+The primary endpoint is the proportion of participants with  
+(1) at least one overnight stay in hospital for progressive COVID-19 symptoms, or  
+(2) who died, by day 28 after randomisation. 
+
+# Sample size calculation
+The Sample size of the study is based on the risk of severe COVID-19 and the effect previously observed by Libster et al. in an elderly high-risk population and a similar intervention of early convalescent plasma. In this study, 31% of the control group patients experienced severe COVID-19 disease, the relative risk of severe COVID-19 in treated patients was 0.52 (95% Confidence Interval 0.29–0.94). We estimate that the risk of severe COVID-19 in the elderly population will be **30%** and the relative risk reduction in the treated group will be **0,5**.
+
+For a cohort, group sample sizes of 158 in group 1 and 158 in group 2 achieve 90% power to detect a difference between the group proportions of -0.15. The proportion in group 1 (the treatment group) is assumed to be 0,30 under the null hypothesis and 0.15 under the alternative hypothesis. The proportion in group 2 (the control group) is 0.30. The test statistic used is the two-sided Z-Test. The significance level of the test is 0.05. The sample size is increased to **170 per group (340 total)** to account for missing data/loss to follow up.
+
+# Original 2-stage design used in the sample size reestimation method
+```{r echo=FALSE}
+# Fixed design sample size
+n.fix <- ceiling(nBinomial(p1 = 0.30, p2 = 0.15, sided = 2, alpha = 0.05))
+n.fix <- 340 #increased by 5% for missing data/loss to follow up
+
+# Following is a template for entering parameters for ssrCP
+# Natural parameter value null and alternate hypothesis values
+delta0 <- 0
+delta1 <- 0.15
+# timing of interim analysis for underlying group sequential design
+timing <- .3
+# upper spending function
+sfu <- sfHSD
+# upper spending function paramater
+sfupar <- -10
+# lower spending function
+sfl <- sfHSD
+# lower spending function paramater
+sflpar <- -10
+# maximum sample size inflation
+maxinflation <- 3
+# assumed enrollment overrrun at IA
+overrun <- 0
+# interim z-values for plotting
+z <- seq(0, 4, .01)
+# Type I error (1-sided)
+alpha <- .025
+# Type II error for design
+beta <- .1
+# Fixed design sample size
+n.fix <- n.fix
+# conditional power interval where sample
+# size is to be adjusted
+cpadj <- c(.5, .9)
+# targeted Type II error when adapting sample size
+betastar <- beta
+# combination test (built-in options are: z2Z, z2NC, z2Fisher) --> sufficient statistic
+z2 <- z2Z
+
+# use the above parameters to generate design
+# generate a 2-stage group sequential design with
+x <- gsDesign(
+  k = 2, n.fix = n.fix, timing = timing, sfu = sfu, sfupar = sfupar, sfl = sfl, sflpar = sflpar, alpha = alpha, beta = beta, endpoint = "Binomial", delta0 = delta0, delta1 = delta1
+)
+summary(x)
+x
+
+plot(x, plottype = 1)
+plot(x, plottype = 2)
+plot(x, plottype = 3)
+plot(x, plottype = 5)
+plot(x, plottype = 6)
+plot(x, plottype = 7)
+```
+
+
+# Planned boundaries for sample size reestimation
+For each cohort, sample size re-estimation will be planned using the method proposed by Mehta and Pocock. Specifically, for each cohort, an interim analysis will be conducted when 30% of the patients, have reached the primary endpoint assessment. The conditional power for detecting the difference in primary outcome between the two arms in the final analysis will then be estimated. If the conditional power is between 50% and 90%, the sample size will be increased in order to achieve 90% power to detect the effect observed at the interim analysis with a maximum sample size of 1020 per cohort. Otherwise, the trial will continue using the planned sample size.
+
+The table below presents the conditional power and estimated effect at interim analysis for values of Z between which sample size will be increased.  
+
+|                       |                   | Estimated effect|at interim analysis |
+|-----------------------|-------------------|-----------------|--------------------|
+| Z at interim analysis | Conditional power | Risk difference | Relative risk      |
+| 1.07                  | 0.50              | -0.09           | 0.66               |
+| 1.66                  | 0.90              | -0.14           | 0.52               |
+
+The interim analysis will be performed by an independent statistician and presented to the DSMB. Decision boundaries are non-binding, and the DSMB can recommend continuing the trial at the pre- planned sample size.  
+Sample size reestimation boundaries and the size of the sample size increase were produced using the gsDesign package v. 3.2 (K. Anderson, Merck research laboratories, Boston, MA) with R version 4.0.5 (The R Foundation for Statistical Computing, Vienna, Austria).
+
+# Results of the event adjudication
+Total number patients randomised 102  
+- 52 in the Standard of care arm  
+- 50 in the Plasma arm  
+
+Observed events:    
+Arm standard of care  
+- patient DE04-057 death at Day 4 (possibly COVID related, rated 3 - possible)  
+- patient NL01-002 hospitalisation for COVID-19 (pulmonary infection, rated 1 - certain) at Day 10  
+
+Event occurred in 3.8% of the patients.
+
+Arm plasma  
+- No event  
+
+# Interim analysis
+## Z test 
+```{r}
+data <-  tibble(group = c("Std", "Plasma"), successes = c(50, 50), failures = c(0,2))  
+data
+ztest.data <- data.frame(data[c("successes","failures")])
+ztest.data
+
+events <- c(2, 0)
+patients <- c(52, 50)
+chi.test.res <- prop.test(events, patients, alternative = "two.sided")
+chi.test.res
+
+z.stat <- sqrt(chi.test.res$statistic)
+z.stat
+(1-pnorm(sqrt(chi.test.res$statistic)))*2
+
+```
+The Z statistic is **`r round(z.stat, 2)`**. P-value is `r round(chi.test.res$p.value, 2)` (although the normal approximation may be incorrect)
+
+## Fisher test 
+```{r}
+fisher.test.res <- fisher.test(events, patients, alternative = "two.sided")
+fisher.test.res
+```
+
+Exact Fisher test gives a p-value of `r fisher.test.res$p.value`.
+
+# Conditional power calculation
+```{r}
+paste("conditional power")
+gsCPz(z= z.stat, i = 1, x = x)
+```
+For the observed Z statistic at the interim analysis, conditional power based of the planned 2-stage design is 0.199 (19.9%).
+
+The conditional power is below the threshold for sample size reestimation that we set at 50%. No adjustment to the sample size will be performed.
+
+To further illustrate this, it would take 2400 patients to have 80% power to detect a 50% reduction in the rate of events considering the rate of events observed in the interim analysis in the control arm (3.8%). 
+
+# Going forward
+There are 3 options going forward:
+
+## Option 1: Change nothing
+The study goes forward as planned until the planned 340 patients are enrolled.
+The trial will most likely be inconclusive for the primary endpoint because it is underpowered, but results on the other endpoints may be of interest. It currently is a moot point because of very low enrollment capacity.
+
+Ethics evaluation: debated but generally viewed as unethical except for "small trials of interventions for rare diseases in which investigators document explicit plans for including their results with those of similar trials in a prospective meta-analysis, and early-phase trials in the development of drugs or devices, provided they are adequately powered for defined purposes other than randomized treatment comparisons".  
+
+References:  
+- Why “underpowered” trials are not necessarily unethical. SJL Edwards DOI: https://doi.org/10.1016/S0140-6736(97)02290-3  
+- The Primary Outcome Fails — What Next? Pocock SJ. N Engl J Med 2016; 375:861-870 DOI: https://doi.org/10.1056/NEJMra1510064  
+- The continuing unethical conduct of underpowered clinical trials. Halpern SD. JAMA 2002;288(3):358-62. DOI: https://doi.org/10.1001/jama.288.3.358    
+
+## Option 2: Change the primary endpoint *a priori*
+If the decision to revise endpoints is **independent of the data** from the trial, then such revisions may have merit. Recommend to record the endpoint change ASAP so that independence of the decision remains credible. This option is at risk of being challenged by the editorial board at the time of publication.
+
+Reference:  
+- When and how can endpoints be changed after initiation of a randomized clinical trial? Evans S. PLoS Clin Trials (2007) 2(4): e18. DOI: https://doi.org/10.1371/journal.pctr.0020018  
+
+## Option 3: Change the primary endpoint based on acquired data
+It may be appropriate to change or identify endpoints after initiation of a trial, even when the decision is based on data from the trial.
+We may divide the trial into two stages: a hypothesis-generating stage in which endpoints are identified, and a subsequent hypothesis-testing stage.
+In this case, statistical testing would be based only on data collected after the first stage was complete.  
+
+Reference:  
+- When and how can endpoints be changed after initiation of a randomized clinical trial? Evans S. PLoS Clin Trials (2007) 2(4): e18. DOI: https://doi.org/10.1371/journal.pctr.0020018 

@@ -1,0 +1,12 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+**.DS_Store
+/Doc
+/programs
+/rapports/sample size
+/rapports/other reports
+/rapports/versions
+/SORTIES
+/SOURCES

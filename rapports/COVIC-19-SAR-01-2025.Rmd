@@ -1,0 +1,2279 @@
+---
+title: "COVIC-19 statistical analysis report"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  word_document: 
+    reference_docx: "../commun/my-style.docx"
+    toc: true
+  html_document: default
+---
+
+```{r setup, include = FALSE, dpi=300}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+
+library(tidyverse)
+library(readxl)
+library(consort)
+library(gtsummary)
+library(gt)
+library(ggplot2)
+library(fmsb)
+library(wesanderson)
+library(UpSetR)
+library(labelled)
+library(boot)
+library(grid)
+
+# Compiler optimization
+dotR <- file.path(Sys.getenv("HOME"), ".R")
+if (!file.exists(dotR)) dir.create(dotR)
+M <- file.path(dotR, "Makevars")
+if (!file.exists(M)) file.create(M)
+arch <- ifelse(R.version$arch == "aarch64", "arm64", "x86_64")
+cat(paste("\nCXX17FLAGS += -O3 -mtune=native -arch", arch, "-ftemplate-depth-256"),
+    file = M, sep = "\n", append = FALSE)
+# library(rstan)
+# For execution on a local, multicore CPU with excess RAM we recommend calling
+options(mc.cores = parallel::detectCores())
+# To avoid recompilation of unchanged Stan programs, we recommend calling
+# rstan_options(auto_write = TRUE)
+
+
+# Analysis setup
+source("../rapports/COVIC-19 analysis setup.R")
+
+theme_gtsummary_journal(journal = "nejm")
+theme_gtsummary_compact()
+
+# Set graphic colors
+library(RColorBrewer)
+my_colors <- brewer.pal(3, "Set2")
+colors_border <- my_colors
+library(scales)
+colors_in <- alpha(my_colors,0.3)
+
+patients <- covic19.data |> select(SUBJECT_REF, RANDOMIZATION_R1)
+
+
+
+# Functions
+
+bootstrap_diff_ci <- function(data, variable, by, ...)
+{ boot_diff <- function(data, indices) {
+        d <- as.data.frame(data[indices,])
+        mean(as.numeric(unlist( d[d[[by]] == levels(d[[by]])[1], variable] , use.names = FALSE))) - 
+        mean(as.numeric(unlist( d[d[[by]] == levels(d[[by]])[2], variable] , use.names = FALSE)))
+      }
+      set.seed(123)
+      boot_result <- boot(data, boot_diff, R = 100000)
+      ci <- boot.ci(boot_result, type = "perc")
+      
+      estimate <- -diff(tapply(as.numeric(data[[variable]]), data[[by]], mean))
+      
+      return( data.frame(
+        estimate = estimate,
+        conf.low = ci$percent[4],
+        conf.high = ci$percent[5],
+        p.value = NA  # Bootstrap doesn't provide a p-value
+      ) ) }
+
+library(DescTools)
+
+binom_diff_ci <- function(data, variable, by, ...) {
+  d <- data
+  x1 <- sum(as.numeric(unlist( d[d[[by]] == levels(d[[by]])[2], variable] , use.names = FALSE)))
+  x2 <- sum(as.numeric(unlist( d[d[[by]] == levels(d[[by]])[1], variable] , use.names = FALSE)))
+  n1 <- length(as.numeric(unlist( d[d[[by]] == levels(d[[by]])[2], variable] , use.names = FALSE)))
+  n2 <- length(as.numeric(unlist( d[d[[by]] == levels(d[[by]])[1], variable] , use.names = FALSE)))
+  bci <- BinomDiffCI(x1, n1, x2, n2, method = "score")
+  
+  ft <- fisher.test(data[[variable]], as.factor(data[[by]]))
+
+      return( data.frame(
+        estimate = bci[1],
+        conf.low = bci[2],
+        conf.high = bci[3],
+        p.value = ft$p.value
+      ) ) }
+
+```
+
+\newpage
+
+# 1 Cover page
+
+**Study title:** A Randomised Open-Label Trial of Early, Very High-Titre
+Convalescent Plasma Therapy in Clinically Vulnerable Individuals with
+Mild
+
+**Short title:** COVIC-19
+
+**Principal investigators:** Hubert Schrezenmeier, Eric Toussirot,
+Antoine Durrbach, Bart A Rijnders
+
+**Sponsors:** German Red Cross Bade Württemberg, CHU Besançon, Erasmus
+MC
+
+**Trial methods:** Maxime Desmarets
+
+**Trial statistician:** Maxime Desmarets
+
+**Protocol version:** 2.4 dated 23/02/2023
+
+**Statistical analysis plan version:** 1.0 dated 24/04/2024
+
+**Data extraction date:** 17/06/2024
+
+\newpage
+
+# 2 Preliminary comments
+
+Endpoints
+
+1.  Proportion of participants with hospitalisation for progressive
+    COVID-19 symptoms, or death by day 14 after randomisation (stages 4
+    to 9 of the WHO scale)
+
+2.  Proportion of participants with hospitalisation for progressive
+    COVID-19 symptoms requiring O2 support, or death by day 14 and 28
+    after randomisation (stages 5 to 9 of the WHO scale)
+
+3.  All-cause mortality by day 28, 90 and 180 after randomisation
+
+4.  Proportion of patients with supplemental oxygen by day 14 and 28
+    after randomisation
+
+5.  Proportion of patients with non-invasive ventilation by day 14 and
+    28 after randomisation
+
+6.  Proportion of patients with intubation and mechanical ventilation by
+    day 14 and 28 after randomisation
+
+7.  Change in 10-point WHO Clinical Progression Scale score by day 14
+    and 28 after randomisation (see below)
+
+8.  Duration of hospital admission censored at 28 days after
+    randomisation (for participants reaching primary endpoint)
+
+9.  Proportion of patients with admission to ITU by day 14 and 28 after
+    randomisation
+
+10. Duration of ITU admission censored at 28 days after randomisation
+
+11. Proportion of patients with long COVID-19 symptoms and time to
+    recovery assessed by questionnaire at days 28 and 180 post
+    randomisation
+
+12. Health-related quality of life assessed using the EQ-5D-5L at 28 and
+    180 days after randomisation
+
+13. Number of serious Adverse Events at 72 hours after randomisation
+    (Grade 3/4 adverse events and AE unexpected for their nature, onset,
+    evolution, severity or frequency)
+
+14. Arterial and venous thromboembolic events at 28, 90 and 180 days
+    after randomization
+
+Exploratory endpoints
+
+1.  Change in SARS-CoV-2 RNA level (Polymerase chain reaction, Cycle
+    Threshold value) in oral or nose/throat swab samples at days 3, 14,
+    28, hospitalisation and 180 after randomisation (cohort 2 only)
+2.  Change in anti-SARS-CoV-2 spike antibody levels in blood at days 3,
+    14, 28 and hospitalisation after randomisation
+3.  SARS-CoV-2 whole-genome sequence analysis in oral or nose/throat
+    swab samples at day 1, 28, hospitalisation and day 180 after
+    randomisation
+4.  Proportion and clinical characteristics of patients with cultivable
+    virus at day 28, hospitalisation and day 180
+5.  Virus sequence variation and cultivability over time, overall and in
+    individuals receiving vs not receiving CP
+
+# 3 Consort flow diagram
+
+```{r fig.height=4, fig.width=8, dpi=300}
+# consort.data <- read_xlsx("~/DATA/COVIC-19/SOURCES/final02/data/covic_consort_data.xlsx")
+# 
+# cons_p <- consort_plot(
+#   data = consort.data,
+#   orders = c(
+#     SUBJECT_REF = "Patients",
+#     RANDOMIZATION_R1 = "Randomized",
+#     exclusion = "Excluded",
+#     treated = "treated",
+#     lost = "Lost to followup",
+#     mitt = "mITT analysis"
+#   ),
+#   side_box = c("exclusion", "lost"),
+#   allocation = "RANDOMIZATION_R1"
+# )
+# cons_p
+
+# Manual flow diagram
+g <- 
+  add_box(txt = "Randomised (n=120)") |> 
+  add_split(txt = c("CCP (n=61)", "Standard (n=59)")) |> 
+  add_side_box(txt = c("Excluded:\n\u2022 Withdrew consent (n=1)", "")) |> 
+  add_box(txt = c("treated (n=60)", "treated (n=59)")) |> 
+  add_side_box(txt = c("Excluded:\n\u2022 Withdrew consent (n=1)\nProtocol deviation:\n\u2022 Discontinued administration\n   of 2nd CCP unit (n=2)",
+                       "Excluded:\n\u2022 Randomised by error (n=1)")) |> 
+  add_box(txt = c("mITT analysis (n=59)", "mITT analysis (n=58)"))
+
+plot(g)
+```
+
+**Figure 1.** CONSORT flow diagram
+
+Note: Plasma arm\n Patient DE-04-019 withdrew consent (with opposition
+to the use of the data collected).\n Patient DE-04-037 withdrew consent
+(without opposition to the use of the data collected) before receiving
+treatment.\n Standard of care arm\n Patient DE-14-001 enrolled in error.
+Patient was hospitalized for Covid-19 at time of enrollment.\n
+Intervention was permanently interrupted during Plasma #2 for patients
+DE-04-053 and DE-04-078.\n \n Protocol deviation:\n
+
+# 4 Baseline patient characteristics
+
+## 4.1 Sociodemographic data and inclusion criteria
+
+```{r table 1, warning=FALSE}
+
+table1.data <- covic19.data2 |> select(RANDOMIZATION_R1, AGE_V, SEX, BLOODGRP, IN07:IN08C1, COUNTRY) 
+
+table1 <- table1.data |>
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = list(all_continuous() ~ "continuous2"),
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})","{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              value = list(IN07:IN08C1 ~ 1),
+              digits = list(all_categorical() ~ c(0, 1))
+              ) |>
+  add_overall() |> 
+  bold_labels()
+
+table1
+```
+
+Note: Organ transplantation patients NL: Plasma 1 Lung ; Standard 1
+Liver , 2 Kidney , 1 Unknown FR: Plasma 2 Kidney ; Standard 3 Kidney
+(source: investigator) DE: Plasma 35 Kidney, 4 Unknown ; Standard 39
+Kidney, 1 Lung
+
+### UpSet plot (including concomitant medications)
+
+```{r dpi=300}
+cd19_20_mmf_patients <- t9_cmtab |> select(SUBJECT_REF, Medication) |> 
+  unique() |> 
+  filter(Medication %in% c("Mycophenolate Mofetil", "Rituximab")) |> 
+  mutate(value = 1) |> 
+  pivot_wider(id_cols = "SUBJECT_REF", names_from = "Medication", values_fill = 0)
+  
+patients_criteria <- covic19.data |> select(SUBJECT_REF, RANDOMIZATION_R1, IN07A1:IN07B3) |>
+  left_join(cd19_20_mmf_patients) |>
+  mutate(IN07A6 = case_when(`Mycophenolate Mofetil` == 1 | Rituximab == 1 ~ 1, .default = IN07A6)) |> 
+  mutate(across(IN07A1:IN07B3, as.numeric)) |> 
+  select(!c("Mycophenolate Mofetil", "Rituximab")) |> 
+  rename(
+    "Lymphoid malignancy" = IN07A1,
+    "Myeloid malignancy" = IN07A2,
+    "Solid tumor" = IN07A3,
+    "Allogenic HSCT" = IN07A4,
+    "Organ transplantation" = IN07A5,
+    "Anti CD19/20 MoAb / MMF" = IN07A6,
+    "Anti CD19/20 CAR-T cell" = IN07A7,
+    "ATG / alemtuzumab" = IN07A8,
+    "AIDS" = IN07A9,
+    # primary immune deficiencies
+    "B cell deficiency" = IN07B1,
+    "T cell deficiency" = IN07B2,
+    "Combined deficiency" = IN07B3
+    # No seroconversion
+    # "No detectable seroconversion" = IN08C1
+  )
+
+figure2a <- as.data.frame(patients_criteria) |>
+  filter(RANDOMIZATION_R1 == "plasma") |> 
+  upset(order.by = "freq",  nsets = 7, mainbar.y.max = 36)
+figure2a
+```
+
+**Figure 2a.** UpSet plot of inclusion critera in plasma arm.
+
+```{r dpi=300}
+figure2b <- as.data.frame(patients_criteria) |> 
+  filter(RANDOMIZATION_R1 == "standard") |> 
+  upset(order.by = "freq", nsets = 8, mainbar.y.max = 36)
+figure2b
+```
+
+**Figure 2b.** UpSet plot of inclusion critera in standard of care arm.
+
+### UpSet plot with correction for organ transplant
+
+```{r dpi=300}
+cd19_20_mmf_patients <- t9_cmtab |> select(SUBJECT_REF, Medication) |> 
+  unique() |> 
+  filter(Medication %in% c("Mycophenolate Mofetil", "Rituximab")) |> 
+  mutate(value = 1) |> 
+  pivot_wider(id_cols = "SUBJECT_REF", names_from = "Medication", values_fill = 0)
+  
+patients_criteria <- covic19.data |> select(SUBJECT_REF, RANDOMIZATION_R1, IN07A1:IN07B3) |>
+  left_join(cd19_20_mmf_patients) |>
+  mutate(IN07A6 = case_when(IN07A5 == 1 | `Mycophenolate Mofetil` == 1 | Rituximab == 1 ~ 1, .default = IN07A6)) |> 
+  select(!c("Mycophenolate Mofetil", "Rituximab")) |> 
+  rename(
+    "Lymphoid malignancy" = IN07A1,
+    "Myeloid malignancy" = IN07A2,
+    "Solid tumor" = IN07A3,
+    "Allogenic HSCT" = IN07A4,
+    "Organ transplantation" = IN07A5,
+    "Anti CD19/20 MoAb / MMF" = IN07A6,
+    "Anti CD19/20 CAR-T cell" = IN07A7,
+    "ATG / alemtuzumab" = IN07A8,
+    "AIDS" = IN07A9,
+    # primary immune deficiencies
+    "B cell deficiency" = IN07B1,
+    "T cell deficiency" = IN07B2,
+    "Combined deficiency" = IN07B3
+  )
+
+figure2a <- as.data.frame(patients_criteria) |> 
+  filter(RANDOMIZATION_R1 == "plasma") |> 
+  upset(order.by = "freq",  nsets = 7, mainbar.y.max = 47)
+figure2a
+```
+
+**Figure 2a.** UpSet plot of inclusion critera in plasma arm.
+
+```{r dpi=300}
+figure2b <- as.data.frame(patients_criteria) |> 
+  filter(RANDOMIZATION_R1 == "standard") |> 
+  upset(order.by = "freq", nsets = 8, mainbar.y.max = 47)
+figure2b
+```
+
+**Figure 2b.** UpSet plot of inclusion critera in standard of care arm.
+
+```{r}
+cll <- covic19.data |> select(SUBJECT_REF, RANDOMIZATION_R1, IN07A6, MH:MH_OTHER, MH_OTHER_TXT) |> filter(SUBJECT_REF %in% c("NL-01-007", "NL-01-009"))
+```
+
+Note: the patients for whom the criteria is only antiCD19-20 MoAb / MMF
+are patients NL-01-007 and NL-01-009. They are both treated for CLL.
+
+NL-01-007: `r cll$MH_OTHER_TXT[1]`
+
+NL-01-009: `r cll$MH_OTHER_TXT[2]`
+
+Only Nirmatrelvir Ritonavir was entered as concomitant medications for
+patient NL-01-007. No comcomitant medication was entered for patient
+NL-01-009.
+
+```{r eval=FALSE, include=FALSE}
+test <- t9_cmtab |> select(SUBJECT_REF, `Medication class`, Medication) |> filter(SUBJECT_REF %in% c("NL-01-007", "NL-01-009"))
+
+```
+
+## 4.2 Comorbidities
+
+```{r comorbidities, warning=FALSE}
+table2.data <- covic19.data2 |> select(RANDOMIZATION_R1, MH:MH_OTHER) |> mutate(across(everything(), ~ replace_na(., "0")))
+
+table2<- table2.data |>
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = c(all_continuous() ~ "continuous2"),
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})","{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              value = list(MH:MH_OTHER ~ 1),
+              digits = list(all_categorical() ~ c(0,1))
+              ) |>
+  add_overall() |> 
+  bold_labels()
+
+table2
+```
+
+Other comorbidities listed in appendix 1
+
+## 4.3 Vaccination
+
+```{r table 3, warning=FALSE}
+
+table3a.data <- covic19.data |> select(RANDOMIZATION_R1, COVID19_VAC, nb_vacdose, COVID19_1STVAC_TYP, COVID19_2NDVAC_TYP, COVID19_3RDVAC_TYP, COVID19_4RDVAC_TYP, days_vac1_rando:days_vac4_rando, days_lastvac_rando)
+
+table3a<- table3a.data |>
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})","{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(all_categorical() ~ c(0, 1))
+              ) |>
+  add_overall() |> 
+  bold_labels()
+
+
+table3b.data <- covic19.data |> filter(COVID19_VAC == "Yes") |> select(RANDOMIZATION_R1, homologous_vac)
+table3b <- table3b.data |>
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})","{min}, {max}"),
+                               all_categorical() ~ "{n} / {N_nonmiss} ({p}%) "),
+              digits = list(all_categorical() ~ c(0,1))
+              ) |>
+  add_overall() |> 
+  bold_labels()
+
+table3 <- tbl_stack(list(table3a, table3b))
+table3
+```
+
+Note: vaccination data is missing for patient DE-01-006 who reached the
+primary endpoint.
+
+```{r}
+table3b.data <- covic19.data |> select(SUBJECT_REF, RANDOMIZATION_R1, COVID19_4RDVAC_TYP, COVID19_4RDVAC_TXT) |> filter(COVID19_4RDVAC_TYP == "Other")
+
+gt(table3b.data)
+```
+
+## 4.4 History of COVID-19
+
+```{r table 4, fig.height=3, fig.width=3, warning=FALSE, dpi=300}
+table4a.data <- covic19.data |> select(RANDOMIZATION_R1, days_cov_rando, days_first_pcr_rando, D1_FEV:D1_BLEED, D1_OTH, D1_COVIDINF90) |> 
+  mutate(across(c(D1_FEV:D1_BLEED, D1_OTH, D1_COVIDINF90), ~replace_na(., 0))) 
+table4a<- table4a.data |>
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = c(all_continuous() ~ "continuous2",
+                       days_cov_rando ~ "continuous2",
+                       days_first_pcr_rando ~ "continuous2"),
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})","{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(all_categorical() ~ 1)
+              ) |>
+  add_overall() |> 
+  bold_labels()
+table4b.data <- covic19.data |> filter(D1_COVIDINF90 == 1) |> select(RANDOMIZATION_R1, D1_COVID90D_NB)
+table4b <- table4b.data |>
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})","{min}, {max}"),
+                               all_categorical() ~ "{n} / {N_nonmiss} ({p}%) "),
+              digits = list(all_categorical() ~ 1)
+              ) |>
+  add_overall() |> 
+  bold_labels()
+
+table4 <- tbl_stack(list(table4a, table4b))
+table4
+
+
+c <- ggplot(table4a.data, aes(days_cov_rando)) +
+  # geom_histogram(binwidth = 1) +
+  geom_bar() +
+  theme_minimal() +
+  scale_x_continuous(breaks = 0:7) +
+  labs(x = "Time from symptom onset to \nrandomisation (days)",
+       y = "Number patients")
+c
+```
+
+## 4.5 Current SARS-CoV-2 infection
+
+```{r SARS-CoV-2 infection, warning=FALSE}
+
+# test <- covic19.data |> select(RANDOMIZATION_R1, D1_PCRASSRES, D1_PCRASSCT_V, D1_PCRASSTYP1, D1_PCRASSTYP2)
+
+table5a.data <- covic19.data |> select(RANDOMIZATION_R1, D1_PCRASSRES, D1_PCRASSCT_V, D1_PCRASSTYP1, D1_PCRASSTYP2)
+table5a<- table5a.data |>
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})","{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(all_categorical() ~ 1)
+              ) |>
+    add_overall() |> 
+    bold_labels()
+
+table5b.data <- covic19.data |> filter(D1_PCRASSTYP1 == "Omicron B.1.1.529") |> select(RANDOMIZATION_R1, OMICRONTYP, D1_PCRASSTYP2)
+table5b <- table5b.data |>
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})","{min}, {max}"),
+                               all_categorical() ~ "{n} / {N_nonmiss} ({p}%) "),
+              digits = list(all_categorical() ~ 1)
+              ) |>
+  add_overall() |> 
+  bold_labels()
+
+table5 <- tbl_stack(list(table5a, table5b), quiet = TRUE)
+table5
+```
+
+### Ct values by country
+
+```{r}
+table6.data <- covic19.data |> select(RANDOMIZATION_R1, COUNTRY_ID, D1_PCRASSCT_V)
+table6a <- table6.data |> filter(RANDOMIZATION_R1 == "plasma") |> 
+  tbl_summary(by = COUNTRY_ID,
+              label = c(RANDOMIZATION_R1 ~ "Arm"),
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})","{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |>
+  bold_labels()
+  
+table6b <- table6.data |> filter(RANDOMIZATION_R1 == "standard") |> 
+  tbl_summary(by = COUNTRY_ID,
+              label = c(RANDOMIZATION_R1 ~ "Arm"),
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})","{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |>
+  bold_labels()
+
+tbl_stack(list(table6a, table6b)) |> modify_header(all_stat_cols() ~ "**{level}**")
+```
+
+### Table of variants not listed
+
+**Table 7.** Variants not listed
+
+```{r VOIs, warning=FALSE}
+table7.data <- covic19.data |> filter(D1_PCRASSTYP1 == "Variant not listed") |> select(RANDOMIZATION_R1, SUBJECT_REF, D1_PCRASSTXT)
+
+table7.data |> gt()
+```
+
+## 4.6 Concomitant medications
+
+### Analysis over the complete follow-up
+
+```{r concomitant medication class, warning=FALSE}
+table8 <- t9_cmtab |> select(SUBJECT_REF, `Medication class` ) |>
+  filter(!is.na(`Medication class`)) |> 
+  unique() |> 
+  dplyr::count(SUBJECT_REF, `Medication class`) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = `Medication class`, values_from = n, values_fill = 0) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(all_categorical() ~ c(0, 1))
+              ) |> 
+  modify_caption("**Table 8.** Medication classes")
+table8
+
+# Table COVID-19 monoclonal antibodies
+table9 <- t9_cmtab |> 
+  filter(`Medication class` == "COVID-19 monoclonal antibodies") |> 
+  select(SUBJECT_REF, Medication) |> 
+  filter(!is.na(Medication)) |>  
+  unique() |> 
+  dplyr::count(SUBJECT_REF, Medication, sort = TRUE) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(all_categorical() ~ c(0, 1))
+              ) |> 
+  modify_caption("**Table 9.** COVID-19 Monoclonal antibodies")
+table9
+
+# Table antivirals
+table10 <- t9_cmtab |> 
+  filter(`Medication class` == "COVID-19 antivirals") |> 
+  select(SUBJECT_REF, Medication) |> 
+  filter(!is.na(Medication)) |>  
+  unique() |> 
+  dplyr::count(SUBJECT_REF, Medication, sort = TRUE)|> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(all_categorical() ~ c(0, 1))
+              ) |> 
+  modify_caption("**Table 10.** COVID-19 Antivirals")
+table10
+
+# Table immunosuppressants
+table11 <- t9_cmtab |> 
+  filter(`Medication class` == "Immunosuppressive agents") |> 
+  select(SUBJECT_REF, Medication) |> 
+  filter(!is.na(Medication)) |> 
+  unique() |> 
+  dplyr::count(SUBJECT_REF, Medication, sort = TRUE) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  mutate(any = if_else(if_any(Tacrolimus:Rituximab) == 1, 1, 0)) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(all_categorical() ~ c(0, 1))
+              ) |> 
+  modify_caption("**Table 11.** Immunosuppressive agents")
+
+table11
+```
+
+### Analysis restricted to Day 28
+
+```{r concomitant medication class D28, warning=FALSE}
+table8 <- t9_cmtab |> 
+  filter(!is.na(`Medication class`) & delai_trt <= 28) |> 
+  select(SUBJECT_REF, `Medication class`) |>
+  unique() |> 
+  dplyr::count(SUBJECT_REF, `Medication class`) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = `Medication class`, values_from = n, values_fill = 0) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(all_categorical() ~ c(0, 1))
+              ) |> 
+  modify_caption("**Table 12.** Medication classes")
+table8
+
+# Table COVID-19 monoclonal antibodies
+table9 <- t9_cmtab |> 
+  filter(`Medication class` == "COVID-19 monoclonal antibodies") |> 
+  select(SUBJECT_REF, Medication, delai_trt) |> 
+  filter(!is.na(Medication) & delai_trt <= 28) |> 
+  unique() |> 
+  dplyr::count(SUBJECT_REF, Medication, sort = TRUE) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(all_categorical() ~ c(0, 1))
+              ) |> 
+  modify_caption("**Table 13.** COVID-19 Monoclonal antibodies")
+table9
+
+# Table antivirals
+table10 <- t9_cmtab |> 
+  filter(`Medication class` == "COVID-19 antivirals" & delai_trt <= 28) |> 
+  select(SUBJECT_REF, Medication) |> 
+  unique() |> 
+  dplyr::count(SUBJECT_REF, Medication, sort = TRUE)|> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(all_categorical() ~ c(0, 1))
+              ) |> 
+  modify_caption("**Table 14.** COVID-19 Antivirals")
+table10
+
+# Table immunosuppressants
+table11 <- t9_cmtab |> 
+  filter(`Medication class` == "Immunosuppressive agents" & delai_trt <= 28) |> 
+  select(SUBJECT_REF, Medication) |> 
+  unique() |> 
+  dplyr::count(SUBJECT_REF, Medication, sort = TRUE) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(all_categorical() ~ c(0, 1))
+              ) |> 
+  modify_caption("**Table 15.** Immunosuppressive agents")
+
+table11
+```
+
+### Analysis by treatment period
+
+```{r}
+table12 <- t9_cmtab |> 
+  filter(`Medication class` == "COVID-19 monoclonal antibodies") |> 
+  select(SUBJECT_REF, classification_trt, Medication) |> 
+  filter(!is.na(Medication)) |> 
+  dplyr::count(SUBJECT_REF, Medication, classification_trt, sort = TRUE) |> 
+  pivot_wider(id_cols = c("SUBJECT_REF", "classification_trt"), names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  group_by(SUBJECT_REF) |> 
+  complete(classification_trt, fill = list(Sotrovimab = 0, `Tixagevimab Cilgavimab` = 0)) |> 
+  ungroup() |>
+  mutate(across(Sotrovimab:`Tixagevimab Cilgavimab`, ~ if_else(. >= 1, 1, 0) )) |> 
+  mutate(across(Sotrovimab:`Tixagevimab Cilgavimab`, ~ factor(., levels = c(0, 1)))) |> 
+  filter(!is.na(classification_trt)) |> 
+  select(!SUBJECT_REF) |> 
+  tbl_strata(
+    strata = "classification_trt",
+    .tbl_fun = 
+      ~ .x |> 
+      tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n}"),
+              value = list(Sotrovimab:`Tixagevimab Cilgavimab` ~ 1)
+              ) |> 
+      modify_header(all_stat_cols() ~ "**{level}**"),
+    .combine_with = "tbl_stack"
+        ) |> 
+  modify_caption("**Table 16.** COVID-19 Monoclonal antibodies")
+table12
+
+test <- t9_cmtab |> select(SUBJECT_REF, `Medication class`, Medication, classification_trt, delai_trt)
+```
+
+Note: statistical unit is the patient. A patient can appear in multiple
+treatment periods.
+
+```{r}
+# Table antivirals
+table13 <- t9_cmtab |> 
+  filter(`Medication class` == "COVID-19 antivirals") |> 
+  select(SUBJECT_REF, classification_trt, Medication) |> 
+  filter(!is.na(Medication)) |> 
+  dplyr::count(SUBJECT_REF, Medication, classification_trt, sort = TRUE) |> 
+  pivot_wider(id_cols = c("SUBJECT_REF", "classification_trt"), names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  group_by(SUBJECT_REF) |> 
+  complete(classification_trt, fill = list(`Nirmatrelvir Ritonavir` = 0, Remdesivir = 0, Molnupiravirvir = 0)) |> 
+  ungroup() |> 
+  mutate(across(`Nirmatrelvir Ritonavir`:Molnupiravir, ~ if_else(. >= 1, 1, 0) )) |> 
+  mutate(across(`Nirmatrelvir Ritonavir`:Molnupiravir, ~ factor(., levels = c(0, 1)))) |> 
+  filter(!is.na(classification_trt)) |> 
+  select(!SUBJECT_REF) |> 
+  tbl_strata(
+    strata = "classification_trt",
+    .tbl_fun = 
+      ~ .x |> 
+      tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n}"),
+              value = list(`Nirmatrelvir Ritonavir`:Molnupiravir ~ 1),
+              missing = "no"
+              ) |> 
+      modify_header(all_stat_cols() ~ "**{level}**"),
+    .combine_with = "tbl_stack"
+        ) |> 
+  modify_caption("**Table 17.** COVID-19 Antivirals")
+table13
+
+```
+
+Note: statistical unit is the patient. A patient can appear in multiple
+treatment periods.
+
+### Description of COVID-19 treatment time relative to enrolment
+
+```{r}
+table14 <- t9_cmtab |>
+  filter(`Medication class` %in%  c("COVID-19 monoclonal antibodies", "COVID-19 antivirals")) |>
+  select(RANDOMIZATION_R1,
+         Medication,
+         delai_trt) |>
+  mutate(delai_trt = ordered(delai_trt)) |> 
+
+  tbl_strata(
+    strata = "Medication",
+    .tbl_fun =
+      ~ .x |>
+      tbl_summary(
+        by = "RANDOMIZATION_R1",
+        label = delai_trt ~ "Time relative to enrolment",
+        type = all_continuous() ~ "continuous2",
+        statistic = list(
+          all_continuous() ~ c("{median} ({p25}, {p75})", "{min}, {max}"),
+          all_categorical() ~ "{n}"
+        ))) |>
+      modify_caption("**Table 18.** Time of COVID-19 medications relative to enrolment in days")
+
+table14
+```
+
+Note: Statistical unit is medication. The same patient can receive
+multiple medications.
+
+### Analysis by country
+
+```{r}
+patients_country <- covic19.data |> select(SUBJECT_REF, RANDOMIZATION_R1, COUNTRY_ID)
+
+# Table COVID-19 monoclonal antibodies
+table15 <- t9_cmtab |> 
+  filter(`Medication class` == "COVID-19 monoclonal antibodies") |> 
+  select(SUBJECT_REF, Medication) |> 
+  filter(!is.na(Medication)) |> 
+  dplyr::count(SUBJECT_REF, Medication, sort = TRUE) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients_country, by = "SUBJECT_REF", all.y = TRUE) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  select(!SUBJECT_REF) |> 
+  tbl_strata(
+    strata = "COUNTRY_ID",
+    .tbl_fun = 
+      ~ .x |> 
+      tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |> 
+      modify_header(all_stat_cols() ~ "**{level}**"),
+    .combine_with = "tbl_stack"
+        ) |> 
+  modify_caption("**Table 19.** COVID-19 Monoclonal antibodies")
+table15
+
+
+# Table antivirals
+table16 <- t9_cmtab |> 
+  filter(`Medication class` == "COVID-19 antivirals") |> 
+  select(SUBJECT_REF, Medication) |> 
+  unique() |> 
+  filter(!is.na(Medication)) |> 
+  dplyr::count(SUBJECT_REF, Medication, sort = TRUE) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients_country, by = "SUBJECT_REF", all.y = TRUE) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  select(!SUBJECT_REF) |> 
+  tbl_strata(
+    strata = "COUNTRY_ID",
+    .tbl_fun = 
+      ~ .x |> 
+      tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |> 
+      modify_header(all_stat_cols() ~ "**{level}**"),
+    .combine_with = "tbl_stack"
+        ) |> 
+  modify_caption("**Table 20.** COVID-19 Antivirals")
+table16
+
+```
+
+### Analysis by center in Germany
+
+```{r}
+patients_country <- covic19.data |> select(SUBJECT_REF, RANDOMIZATION_R1, COUNTRY_ID, SITE_ID)
+
+# Table antivirals
+table16 <- t9_cmtab |> 
+  filter(`Medication class` == "COVID-19 antivirals") |> 
+  select(SUBJECT_REF, Medication) |> 
+  unique() |> 
+  filter(!is.na(Medication)) |> 
+  dplyr::count(SUBJECT_REF, Medication, sort = TRUE) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients_country, by = "SUBJECT_REF", all.y = TRUE) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  filter(COUNTRY_ID == "DE") |> 
+  select(!c("SUBJECT_REF", "COUNTRY_ID")) |> 
+  tbl_strata(
+    strata = "SITE_ID",
+    .tbl_fun = 
+      ~ .x |> 
+      tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |> 
+      modify_header(all_stat_cols() ~ "**{level}**"),
+    .combine_with = "tbl_stack"
+        ) |> 
+  modify_caption("**Table 21.** COVID-19 Antivirals")
+table16
+
+```
+
+### Focus on COVID medication combinations
+
+```{r}
+upset_cm_a <- t9_cmtab |> 
+  filter(`Medication class` %in% c("COVID-19 antivirals", "COVID-19 monoclonal antibodies")) |> 
+  filter(!is.na(Medication), RANDOMIZATION_R1 == "plasma") |>  
+  select(SUBJECT_REF, Medication) |> 
+  unique() |> 
+  dplyr::count(SUBJECT_REF, Medication, sort = TRUE) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) 
+  
+upset(upset_cm_a)
+
+```
+
+**Figure 3a.** UpSet plot of COVID-19 medications in plasma arm
+
+```{r}
+upset_cm_b <- t9_cmtab |> 
+  filter(`Medication class` %in% c("COVID-19 antivirals", "COVID-19 monoclonal antibodies")) |> 
+  filter(!is.na(Medication), RANDOMIZATION_R1 == "standard") |>  
+  select(SUBJECT_REF, Medication) |> 
+  unique() |> 
+  dplyr::count(SUBJECT_REF, Medication, sort = TRUE) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) 
+  
+upset(upset_cm_b)
+
+```
+
+**Figure 3b.** UpSet plot of COVID-19 medications in standard of care
+arm
+
+```{r}
+upset_cm_c <- t9_cmtab |> 
+  filter(`Medication class` %in% c("COVID-19 antivirals", "COVID-19 monoclonal antibodies")) |> 
+  filter(!is.na(Medication)) |>  
+  select(SUBJECT_REF, Medication) |> 
+  unique() |> 
+  dplyr::count(SUBJECT_REF, Medication, sort = TRUE) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) 
+  
+upset(upset_cm_c)
+
+```
+
+**Figure 3c.** UpSet plot of COVID-19 medications in all patients
+
+## 4.7 Clinical examination
+
+```{r clinical examination, warning=FALSE}
+table17 <- covic19.data |> select(RANDOMIZATION_R1, D1_STATE, WEIGHT_V, HEIGHT_V, BMI_V, TEMP_V, HR_V, SYSBP_V, DIABP_V, RR_V, SPO2_V) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |> 
+  bold_labels() |> 
+  modify_caption("**Table 22.** Clinical examination")
+    
+table17
+```
+
+## 4.8 Laboratory assessments
+
+```{r lab assessments, warning=FALSE}
+table23 <-
+  covic19.data |> select(
+    RANDOMIZATION_R1,
+    D1_CREAT_V,
+    D1_ALT_V,
+    D1_AST_V,
+    D1_CA_V,
+    D1_PHOS_V,
+    D1_GLUC_V,
+    D1_UREA_V,
+    D1_CRP_V,
+    D1_LDH_V,
+    D1_DDIMER_V,
+    D1_FERRITIN_V,
+    D1_NA_V,
+    D1_K_V,
+    D1_CL_V,
+    D1_HCO3_V,
+    D1_IL6_V,
+    D1_WBC_V,
+    D1_LYMCE_V,
+    D1_LYMCEPC_V,
+    D1_NEUT_V,
+    D1_NEUTPC_V,
+    D1_LNR_V,
+    D1_HGB_V,
+    D1_PLAT_V,
+    D1_APTT_V,
+    D1_FIBRINOGEN_V,
+    D1_INR_V,
+    D1_IGAASS,
+    D1_IGAASSRATIO_V,
+    D1_IGGASS,
+    D1_IGGASSRATIO_V
+  ) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = c(all_continuous() ~ "continuous2"),
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |> 
+  bold_labels() |> 
+  modify_caption("**Table 23.** Laboratory assessments")
+    
+table23
+```
+
+## 4.9 Long COVID-19 measurements
+
+### PCFS
+
+```{r table 13 PCFS}
+dichotomous <- c()
+continuous <- c("PCFS_D1")
+
+table19.data <- covic19.data |> select(RANDOMIZATION_R1, all_of(continuous))
+
+table19 <- tbl_summary(
+  table19.data,
+  by = "RANDOMIZATION_R1",
+  type = list(
+    PCFS_D1 ~ "continuous2"
+  ),
+  statistic = list(
+    all_continuous() ~ c("{median} ({p25}, {p75})", "{min}, {max}"),
+    all_categorical() ~ "{n} ({p}%)"
+  )
+) |>
+  bold_labels() |>
+  add_n() |> 
+  modify_caption("**Table 24.** PCFS")
+
+table19
+```
+
+### C19-YRS
+
+#### Pre-COVID-19
+
+```{r}
+# c19yrs.data <- covic19.data |> select(C19_YRSDAT_D1_D:C19_YRS229TXT_D1, C19_YRSDAT_D28_D:C19_YRS229TXT_D28, C19_YRSDAT_D180_D:C19_YRS229TXT_D180)
+
+c19yrs_pre <- covic19.data |> select(RANDOMIZATION_R1, c19yrs_symptom_pre, c19yrs_function_pre, c19yrs_overall_pre)
+
+table_c19yrs_pre <- c19yrs_pre |>
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |>
+  bold_labels() |> 
+  modify_caption("**Table 25.** C19-YRS")
+
+table_c19yrs_pre
+
+```
+
+#### Day 1
+
+```{r}
+c19yrs_d1 <- covic19.data |> select(RANDOMIZATION_R1, c19yrs_symptom_d1, c19yrs_function_d1,
+                                    c19yrs_additional_d1, c19yrs_overall_d1)
+
+table_c19yrs_d1 <- c19yrs_d1 |>
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = list(all_continuous() ~ "continuous2",
+                          c19yrs_additional_d1 ~ "continuous2"),
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |>
+  bold_labels() |> 
+  modify_caption("**Table 26.** C19-YRS")
+
+table_c19yrs_d1
+```
+
+## 4.10 Health-related Quality of Life
+
+```{r}
+qol_data <- covic19.data |>
+  select(SUBJECT_REF, RANDOMIZATION_R1, EQ5D5L1_D1:EQ5D5L5_D1, EQ5D5L1_D28:EQ5D5L5_D28, EQ5D5L1_D180:EQ5D5L5_D180) |>
+  mutate(across((c(EQ5D5L1_D1:EQ5D5L5_D1, EQ5D5L1_D28:EQ5D5L5_D28, EQ5D5L1_D180:EQ5D5L5_D180)), \(x) as.numeric(x) )) |> 
+  pivot_longer(cols = !c(SUBJECT_REF, RANDOMIZATION_R1),
+               names_to = c("Dimension","Time"),
+               names_pattern = "EQ5D5L([0-5])_(.*)") |>
+  mutate(Dimension = case_match(Dimension, 
+                                "1" ~ "Mobility",
+                                "2" ~ "Self-care",
+                                "3" ~ "Usual activities",
+                                "4" ~ "Pain/discomfort",
+                                "5" ~ "Anxiety/depression")) |> 
+  group_by(RANDOMIZATION_R1, Dimension, Time) |> 
+  summarize(avg = mean(value, na.rm = T))
+  # mutate(value = case_match(value, 
+  #                               1 ~ "No problem",
+  #                               2 ~ "Slight",
+  #                               3 ~ "Moderate",
+  #                               4 ~ "Severe",
+  #                               5 ~ "Unable/extreme")) 
+  
+qol_data_d1 <- qol_data |>
+  filter(Time == "D1") |>
+  select(!Time) |> 
+  pivot_wider(names_from = Dimension, values_from = avg) |> 
+  column_to_rownames(var = "RANDOMIZATION_R1")
+qol_data_d1 <- rbind(rep(5,5) , rep(0,5) , qol_data_d1)
+
+
+radarchart(qol_data_d1, caxislabels = rep(1:5), axislabcol = "gray", axistype = 1, cglcol = "gray", cglty = 1, 
+             pcol=colors_border, pfcol=colors_in , plwd=2 , plty=1,
+             vlcex = 0.8, title = "Day 1")
+legend(x=-1.2, y=1.1, legend = rownames(qol_data_d1[-c(1,2),]), bty = "n", pch=20 , col=colors_border , text.col = "black", cex=0.8, pt.cex=2)
+```
+
+**Figure 4.** Day 1 HR-QoL
+
+## 4.11 Intervention
+
+```{r intervention, warning=FALSE}
+table22 <-
+  covic19.data |> 
+  filter (RANDOMIZATION_R1 == "plasma") |> 
+  select(days_rando_plasma, days_cov_plasma, PLASMA_NB,
+    # remember to add volume, ab quantity analysis, concordanceq
+    plasma1_duration, PLASMA1_RATE, plasma2_duration, PLASMA2_RATE, plasma_duration, PLASMA1_DISC, PLASMA1_DISC_TEMP, PLASMA1_DISC_PERM, PLASMA2_DISC, PLASMA2_DISC_TEMP, PLASMA2_DISC_PERM, PLASMA1_TEMP, PLASMA1_BP, PLASMA1_ALL, PLASMA1_ALL_TYP, PLASMA1_AE_YN, PLASMA2_TEMP, PLASMA2_BP, PLASMA2_ALL, PLASMA2_ALL_TYP, PLASMA2_AE_YN
+  ) |> 
+  set_variable_labels(
+    days_rando_plasma = "Time from randomisation to plasma infusion (days)",
+    days_cov_plasma = "Time from symptom onset to plasma infusion (days)",
+    plasma1_duration = "Plasma 1 duration (min)",
+    plasma2_duration = "Plasma 2 duration (min)"
+    ) |> 
+  tbl_summary(type = c(all_continuous() ~ "continuous2",
+                       days_rando_plasma ~ "continuous2",
+                       days_cov_plasma ~ "continuous2",
+                       PLASMA1_BP ~ "continuous2",
+                       PLASMA2_BP ~ "continuous2"),
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |> 
+  bold_labels() |> 
+  modify_caption("**Table 27.** Intervention")
+    
+table22
+
+disc <- covic19.data |> select(SUBJECT_REF, PLASMA2_DISC, PLASMA2_DISC_PERM)
+```
+
+Note: Patient DE-11-004 received the plasma transfusion on day 5 after
+randomization. Intervention was permanently interrupted during Plasma #2
+for patients DE-04-053 and DE-04-078 DE-04-053: Allergic reaction
+(DE-04-053-AE/SAE-01) DE-04-078: Allergic reaction (DE-04-078-AE/SAE-01)
+
+**Table 28.** Details of allergic reactions
+
+```{r}
+t11_ae_recoded |> filter(AENUMGLOBAL %in% c("DE-04-053-AE/SAE-01", "DE-04-078-AE/SAE-01")) |> select(AENUMGLOBAL, AETERM_CTCAE_recoded, AESER, AEOUT_C1, AEINFO) |> rename(`AE ID` = AENUMGLOBAL, `AE CTCAE` = AETERM_CTCAE_recoded, Serious = AESER, Resolved = AEOUT_C1, Details = AEINFO) |> gt()
+```
+
+\newpage
+
+# 5 Primary endpoint
+
+The primary endpoint is the proportion of participants with\
+(1) at least one overnight stay in hospital for progressive COVID-19
+symptoms, or\
+(2) who died, by day 28 after randomisation.
+
+## 5.1 Results of the event adjudication
+
+5 events were observed
+
+**Table 29.** Event adjudication
+
+```{r}
+adjudicated_events |> gt() 
+```
+
+## 5.2 Main analysis
+
+### Unadjusted risk difference
+
+```{r}
+primary_table <- covic19.data |> 
+  select(RANDOMIZATION_R1, event) |> 
+  tbl_summary(
+    by = RANDOMIZATION_R1
+  ) |> 
+  add_n() |> 
+  add_difference(event ~ binom_diff_ci) |> 
+  modify_caption("**Table 30.** Main analysis")
+
+primary_table
+
+# Just in case, the exact confidence interval
+# library(ExactCIdiff)
+# BinomCI(60, 58, 0, 5)
+
+# $conf.level
+# [1] 0.95
+# 
+# $CItype
+# [1] "Two.sided"
+# 
+# $estimate
+# [1] -0.086207
+# 
+# $ExactCI
+# [1] -0.20344 -0.00832
+
+```
+
+Note: p-value from Fisher's exact test.
+
+```{r eval=FALSE, include=FALSE}
+### Risk difference, adjusted on country of enrollment
+
+covic19.data |> 
+  select(RANDOMIZATION_R1, COUNTRY_ID, event) |> 
+  tbl_summary(
+    by = RANDOMIZATION_R1,
+    include = event,
+    missing = "no"
+  ) |> 
+  add_n() |> 
+  add_difference(test = event ~ "ancova",
+                 adj.vars = COUNTRY_ID) |> 
+  modify_caption("**Table 25.** Main analysis, adjusted for center effect")
+
+
+
+
+# Logistic regression
+m1 <- glm(formula = event ~ relevel(RANDOMIZATION_R1, ref = "standard") + COUNTRY_ID, family = binomial(link = "logit"), 
+    data = covic19.data)
+m1
+summary(m1)
+tbl_regression(m1, exponentiate = TRUE)
+
+
+# Standard mixed model
+
+m2 <- glmer(event ~ RANDOMIZATION_R1 + (1|COUNTRY_ID), 
+               data = covic19.data,
+               family = binomial(link = "logit")
+            )
+
+m2
+summary(m2)
+tbl_regression(m2, exponentiate = TRUE)
+
+# Mixed model with Firth penalization
+
+library(lme4)
+
+# First, create a custom family function that incorporates Firth's method
+firth_family <- function() {
+  family <- binomial()
+  family$linkfun <- function(mu) log(mu/(1-mu))
+  family$linkinv <- function(eta) 1/(1+exp(-eta))
+  family$initialize <- expression({
+    n <- rep(1, nobs)
+    mustart <- (y + 0.5) / 2
+  })
+  family
+}
+
+# Assuming your data is in a dataframe called 'trial_data'
+# with columns: 'event' (0/1), 'treatment' (0/1), 'center' (factor)
+
+# Fit the model
+model <- glmer(event ~ RANDOMIZATION_R1 + (1|COUNTRY_ID), 
+               data = covic19.data,
+               family = firth_family(),
+               # control = glmerControl(optimizer = "bobyqa")
+               )
+
+# Summary of the model
+summary(model)
+
+# Confidence intervals
+confint(model)
+
+tbl_regression(model, exponentiate = TRUE)
+
+
+# Exact logistic regression
+exlogisticdat <- covic19.data |> 
+  group_by(RANDOMIZATION_R1, COUNTRY_ID) |> 
+  summarise(event = sum(event),
+            n = n())
+
+library(elrm)
+m <- elrm(formula = event/n ~ RANDOMIZATION_R1 + COUNTRY_ID, interest = ~RANDOMIZATION_R1 + COUNTRY_ID, iter = 1000000, dataset = exlogisticdat, burnIn = 2000)
+
+plot(m)
+summary(m)
+
+
+data(drugDat);
+drug.elrm = elrm(formula=recovered/n~sex+treatment, interest=~sex+treatment, 
+	r=4,iter=40000, burnIn=1000, dataset=drugDat);
+
+
+plot(drug.elrm)
+summary(drug.elrm)
+
+```
+
+## 5.3 Subgroup analyses
+
+```{r, results='markup'}
+table_age <- covic19.data |> 
+  select(RANDOMIZATION_R1, event, age_median ) |> 
+  tbl_strata2(
+    strata = age_median,
+    .tbl_fun =
+      ~ .x %>%
+        tbl_summary(
+          by = RANDOMIZATION_R1,
+          missing = "no",
+          label = list(event = .y)) |> 
+        add_n() |> 
+        add_difference(event ~ binom_diff_ci) |> 
+        modify_column_hide(columns = p.value),
+    .combine_with = "tbl_stack") 
+
+table_sex <- covic19.data |> 
+  select(RANDOMIZATION_R1, event, SEX ) |> 
+  tbl_strata2(
+    strata = SEX,
+    .tbl_fun =
+      ~ .x %>%
+        tbl_summary(
+          by = RANDOMIZATION_R1,
+          missing = "no",
+          label = list(event = .y)) |> 
+        add_n() |> 
+        add_difference(event ~ binom_diff_ci) |> 
+        modify_column_hide(columns = p.value),
+    .combine_with = "tbl_stack")
+
+table_variant <- covic19.data |> 
+  select(RANDOMIZATION_R1, event, variant_omicron ) |> 
+  filter(!is.na(variant_omicron)) |> 
+  tbl_strata2(
+    strata = variant_omicron,
+    .tbl_fun =
+      ~ .x %>%
+        tbl_summary(
+          by = RANDOMIZATION_R1,
+          missing = "no",
+          label = list(event = .y)) |> 
+        add_n(),
+        # add_difference(event ~ binom_diff_ci) |> 
+        # modify_column_hide(columns = p.value),
+    .combine_with = "tbl_stack")
+
+table_vac <- covic19.data |> 
+  select(RANDOMIZATION_R1, event, COVID19_VAC ) |> 
+  filter(!is.na(COVID19_VAC)) |> 
+  tbl_strata2(
+    strata = COVID19_VAC,
+    .tbl_fun =
+      ~ .x %>%
+        tbl_summary(
+          by = RANDOMIZATION_R1,
+          missing = "no",
+          label = list(event = .y)) |> 
+        add_n() ,
+    .combine_with = "tbl_stack")
+
+table_moab <- covic19.data |> 
+  select(RANDOMIZATION_R1, event, `COVID-19 monoclonal antibodies` ) |> 
+  tbl_strata2(
+    strata = `COVID-19 monoclonal antibodies`,
+    .tbl_fun =
+      ~ .x %>%
+        tbl_summary(
+          by = RANDOMIZATION_R1,
+          missing = "no",
+          label = list(event = .y)) |>  
+        add_n() |> 
+        add_difference(event ~ binom_diff_ci) |> 
+        modify_column_hide(columns = p.value),
+    .combine_with = "tbl_stack")
+
+table_antiviral <- covic19.data |> 
+  select(RANDOMIZATION_R1, event, `COVID-19 antivirals` ) |> 
+  tbl_strata2(
+    strata = `COVID-19 antivirals`,
+    .tbl_fun =
+      ~ .x |> 
+        tbl_summary(
+          by = RANDOMIZATION_R1, 
+          missing = "no",
+          label = list(event = .y)) |> 
+        add_n() |>
+        add_difference(event ~ binom_diff_ci) |>
+        modify_column_hide(columns = p.value),
+    .combine_with = "tbl_stack")
+
+main_table <- tbl_stack(
+  list(
+    table_age,
+    table_sex,
+    table_variant,
+    table_vac,
+    table_moab,
+    table_antiviral
+  ),
+  group_header = c(
+    "Age",
+    "Sex",
+    "Variant",
+    "Vaccination status",
+    "Monoclonal antibodies",
+    "Antivirals"
+  )
+) |>
+  modify_caption("**Table 31.** Subgroup analyses") |> 
+modify_header(all_stat_cols() ~ "**{level}**")
+
+main_table
+```
+
+Note: unlisted variants CN.1, EG.1, EG.5.1, FW.2 and XBK are classified
+as Omicron.
+
+### Forest plot
+
+```{r fig.height=6, fig.width=9, dpi=300}
+library(forestploter)
+# Fonction pour extraire les valeurs de CI
+extract_ci_values <- function(ci) {
+  # Extract numbers and their signs
+  values <- regmatches(ci, gregexpr("-?\\d+(\\.\\d+)?", ci))[[1]]
+  
+  # Convert to numeric and divide by 100 to get proportions
+  numeric_values <- as.numeric(values)
+  
+  return(list(
+    lower = numeric_values[1],
+    upper = numeric_values[2]
+  ))
+}
+# PANEL A
+
+primary_tibble <- as_tibble(primary_table) |> 
+  mutate(
+    est = as.numeric(sub("%", "", `**Difference**`)),
+    low = extract_ci_values(`**95% CI**`)$lower,
+    high = extract_ci_values(`**95% CI**`)$upper,
+    se = (abs((high - est)) / 1.96) + 10^-6,
+    x = 1/sqrt(se)
+  ) |> 
+  mutate(size = x/max(x, na.rm = TRUE)) |> 
+
+# Add a blank column for the forest plot to display CI.
+# Adjust the column width with space, and increase the number of spaces below 
+# to have a larger area to draw the CI. 
+  mutate(` `= paste(rep(" ", 25), collapse = " ")) |> 
+# Create a confidence interval column to display
+  mutate(`Diff. (95% CI)` = ifelse(is.na(se), "",
+                             sprintf("%.1f%% (%.1f%% – %.1f%%)",
+                                     est, low, high))) |> 
+  rename(Group = `**Characteristic**`,
+         N = `**N**`,
+         `Plasma*` = `**plasma**  
+N = 59`,
+         `Standard*` = `**standard**  
+N = 58`,
+         `p-value` = `**p-value**`) |> 
+  mutate(Group = "All patients")
+
+# PANEL B
+# Intercalate headers using reframe()
+main_tibble <- as_tibble(main_table) |> fill(`**Group**`) 
+
+headers <- main_tibble |> 
+  group_by(`**Group**`) |> 
+  reframe(`**Characteristic**` = c(first(`**Group**`), `**Characteristic**`)) |> 
+  arrange(match(`**Group**`, c("Age", "Sex", "Variant", "Vaccination status", "Monoclonal antibodies", "Antivirals")))
+
+main_tibble_intercalated <- left_join(headers, main_tibble, by = c("**Group**", "**Characteristic**")) |>
+  select(!`**Group**`) |> rename(Group = `**Characteristic**`)
+
+main_tibble_intercalated <- main_tibble_intercalated |> 
+  rowwise() |>
+  mutate(
+    est = as.numeric(sub("%", "", `**Difference**`)),
+    low = extract_ci_values(`**95% CI**`)$lower,
+    high = extract_ci_values(`**95% CI**`)$upper,
+    se = (abs((high - est)) / 1.96) + 10^-6,
+    x = 1/sqrt(se)
+  ) |> 
+  ungroup() |> 
+  mutate(size = x/max(x, na.rm = TRUE)) |> 
+  rename(N = `**N**`,
+         `Plasma*` = `**plasma**`,
+         `Standard*` = `**standard**`) |>
+# Indent subgroups
+  mutate(Group = ifelse(is.na(`Plasma*`), Group, paste0("   ", Group))) |> 
+# Fill NAs with blanks
+  mutate(across(c("N", "Standard*", "Plasma*"), ~replace_na(., ""))) |> 
+# Add a blank column for the forest plot to display CI.
+# Adjust the column width with space, and increase the number of spaces below 
+# to have a larger area to draw the CI. 
+  mutate(` `= paste(rep(" ", 25), collapse = " ")) |> 
+# Create a confidence interval column to display
+  mutate(`Diff. (95% CI)` = ifelse(is.na(se), "",
+                             sprintf("%.1f%% (%.1f%% – %.1f%%)",
+                                     est, low, high)))
+
+## Draw the plot
+# Change footnote font size with forest theme
+tm <- forest_theme(footnote_gp = gpar(cex = 0.9))
+
+# Forest plot Panel A
+pA <- forest(primary_tibble[,c(1:4, 14:15, 7)],
+            est = primary_tibble$est,
+            lower = primary_tibble$low, 
+            upper = primary_tibble$high,
+            sizes = primary_tibble$size,
+            ci_column = 5,
+            ref_line = 0,
+            xlim = c(-40, 10),
+            theme = tm
+            )
+
+# Forest plot Panel B
+pB <- forest(main_tibble_intercalated[,c(1:4, 13:14)],
+            est = main_tibble_intercalated$est,
+            lower = main_tibble_intercalated$low, 
+            upper = main_tibble_intercalated$high,
+            sizes = main_tibble_intercalated$size,
+            ci_column = 5,
+            ref_line = 0,
+            arrow_lab = c("Plasma\nbetter", "Standard\nbetter"),
+            xlim = c(-40, 10),
+            footnote = "*Events (%)",
+            theme = tm
+            )
+# Print plot
+par(mfrow = c(2, 1))
+pA
+pB
+
+```
+
+### Forest plot for publication
+
+```{r fig.height=5, fig.width=9, dpi=300}
+
+main_table2 <- tbl_stack(
+  list(
+    table_age,
+    table_sex,
+    table_moab,
+    table_antiviral
+  ),
+  group_header = c(
+    "Age",
+    "Sex",
+    "Monoclonal antibodies",
+    "Antivirals"
+  )
+) |>
+  modify_caption("**Table 26.** Subgroup analyses") |> 
+  modify_header(all_stat_cols() ~ "**{level}**")
+
+# Intercalate headers using reframe()
+main_tibble2 <- as_tibble(main_table2) |> fill(`**Group**`) 
+
+headers <- main_tibble2 |> 
+  group_by(`**Group**`) |> 
+  reframe(`**Characteristic**` = c(first(`**Group**`), `**Characteristic**`)) |> 
+  arrange(match(`**Group**`, c("Age", "Sex", "Monoclonal antibodies", "Antivirals")))
+
+main_tibble_intercalated <- left_join(headers, main_tibble2, by = c("**Group**", "**Characteristic**")) |>
+  select(!`**Group**`) |> rename(Group = `**Characteristic**`)
+
+main_tibble_intercalated <- main_tibble_intercalated |> 
+  rowwise() |>
+  mutate(
+    est = as.numeric(sub("%", "", `**Difference**`)),
+    low = extract_ci_values(`**95% CI**`)$lower,
+    high = extract_ci_values(`**95% CI**`)$upper,
+    se = (abs((high - est)) / 1.96) + 10^-6,
+    x = 1/sqrt(se)
+  ) |> 
+  ungroup() |> 
+  mutate(size = x/max(x, na.rm = TRUE)) |> 
+  rename(N = `**N**`,
+         `Plasma*` = `**plasma**`,
+         `Standard*` = `**standard**`) |>
+# Indent subgroups
+  mutate(Group = ifelse(is.na(`Plasma*`), Group, paste0("   ", Group))) |> 
+# Fill NAs with blanks
+  mutate(across(c("N", "Standard*", "Plasma*"), ~replace_na(., ""))) |> 
+# Add a blank column for the forest plot to display CI.
+# Adjust the column width with space, and increase the number of spaces below 
+# to have a larger area to draw the CI. 
+  mutate(` `= paste(rep(" ", 25), collapse = " ")) |> 
+# Create a confidence interval column to display
+  mutate(`Diff. (95% CI)` = ifelse(is.na(se), "",
+                             sprintf("%.1f%% (%.1f%% – %.1f%%)",
+                                     est, low, high)))
+
+
+tm <- forest_theme(footnote_gp = gpar(cex = 0.9))
+p <- forest(main_tibble_intercalated[,c(1:4, 13:14)],
+            est = main_tibble_intercalated$est,
+            lower = main_tibble_intercalated$low, 
+            upper = main_tibble_intercalated$high,
+            sizes = main_tibble_intercalated$size,
+            ci_column = 5,
+            ref_line = 0,
+            arrow_lab = c("Plasma\nbetter", "Standard\nbetter"),
+            xlim = c(-40, 10),
+            footnote = "*Events (%)",
+            theme = tm
+            )
+
+# Print plot
+p
+
+```
+
+\newpage
+
+# 6 Secondary endpoints
+
+```{r table 32 sec endpoints, warning=FALSE}
+
+dichotomous <- c("event14","oms5_14", "oms5_28", "death28","death90", "death180","o2_14", "o2_28", "o2_14", "o2_28", "niv_14", "niv_28", "pcfs2_d28", "pcfs2_d180")
+continuous <- c("oms_change_14", "oms_change_28","diff_pcfs_d1_d28", "diff_pcfs_d1_d180")
+
+
+table32.data <-
+  covic19.data |> 
+  select(RANDOMIZATION_R1, event14, oms5_14, oms5_28, death28, death90, death180, o2_14, o2_28, o2_14, o2_28, niv_14, niv_28, mv_14, mv_28, oms_change_14, oms_change_28, icu_14, icu_28, pcfs2_d28, pcfs2_d180, diff_pcfs_d1_d28, diff_pcfs_d1_d180) |> 
+  mutate(RANDOMIZATION_R1 = as.factor(RANDOMIZATION_R1)) |> 
+  mutate(across(c(mv_14, mv_28, icu_14), ~ factor(., levels = c(0, 1))))
+
+table32 <- table32.data |>
+  tbl_summary(
+    by = RANDOMIZATION_R1,
+    type = list(continuous ~ "continuous", dichotomous ~ "dichotomous"),
+    value = list(mv_14 ~ 1,
+                 mv_28 ~ 1,
+                 icu_14 ~ 1),
+    label = list(mv_14 ~ "Mechanical ventilation (day 14)",
+                 mv_28 ~ "Mechanical ventilation (day 28)",
+                 icu_14 ~ "ICU admission (day 14)")
+  ) |> 
+  add_n() |> 
+  add_difference(
+    include = c(all_of(dichotomous), all_of(continuous), icu_28),
+    test = list(dichotomous ~ "binom_diff_ci",
+                icu_28 ~ "binom_diff_ci",
+                pcfs2_d28 ~ "prop.test",
+                pcfs2_d180 ~ "prop.test",
+                continuous ~ "t.test")
+  ) |>
+  bold_labels() |>
+  modify_column_hide(columns = p.value) |> 
+  modify_caption("**Table 32.** Secondary endpoints") 
+
+table32
+
+test <- covic19.data |> select(SUBJECT_REF, event14, death28, death180, niv_14, niv_28, oms_change_14, oms_change_28, pcfs2_d28, pcfs2_d180)
+
+```
+
+Note: PCFS: Post COVID Functional Scale (rated 0 best to 4 worst).
+Length of hospital stay not calculable, insufficient data (date of end
+of stay missing). Length of ICU stay not calculable, insufficient data
+(date of discharge missing)
+
+Note: WHO scale missing for patient NL-01-011 at day 3 (was WHO-4
+"assistance needed" at day 14). Was hospitalized at day 2 with Sp02 90%
+but was rated WHO-5 "hospitalized, no oxygen" upon hospitalization and
+Sp02 was measured at 97%.
+
+# 7 Long COVID-19
+
+## PCFS
+
+```{r table 33 PCFS}
+dichotomous <- c()
+continuous <- c("PCFS_D28", "PCFS_D180")
+
+table33.data <-
+  covic19.data |> select(RANDOMIZATION_R1, all_of(dichotomous), all_of(continuous))
+
+table33 <- tbl_summary(
+  table33.data,
+  by = "RANDOMIZATION_R1",
+  type = list(all_continuous() ~ "continuous2",
+              continuous ~ "continuous",
+              dichotomous ~ "dichotomous")
+) |>
+  bold_labels() |>
+  add_difference() |>
+  add_n() |> 
+  modify_column_hide(columns = p.value) |> 
+  modify_caption("**Table 33.** PCFS")
+
+table33
+```
+
+## C19-YRS
+
+```{r table 34 C19-YRS}
+dichotomous <- c()
+continuous <- c("c19yrs_symptom_d28", "c19yrs_function_d28", "c19yrs_overall_d28",
+                "c19yrs_symptom_d180", "c19yrs_function_d180", "c19yrs_overall_d180",
+                "diff_c19yrs_symptom_pre_d28", "diff_c19yrs_function_pre_d28", "diff_c19yrs_overall_pre_d28",
+                "diff_c19yrs_symptom_pre_d180", "diff_c19yrs_function_pre_d180", "diff_c19yrs_overall_pre_d180")
+
+table34.data <- covic19.data |> select(RANDOMIZATION_R1, all_of(dichotomous), all_of(continuous))
+
+table34 <- tbl_summary(
+  table34.data,
+  by = "RANDOMIZATION_R1",
+  type = list(all_continuous() ~ "continuous2",
+              continuous ~ "continuous",
+              dichotomous ~ "dichotomous")
+) |>
+  bold_labels() |>
+  add_difference() |>
+  add_n() |> 
+  modify_column_hide(columns = p.value) |>
+  modify_caption("**Table 34.** C-19 YRS")
+table34
+```
+
+# 8 Health-related Quality of Life
+
+```{r QoL, fig.height=4, fig.width=12, warning=FALSE, dpi=300}
+# cols <- c(EQ5D5L1_D1:EQ5D5L5_D1, EQ5D5L1_D28:EQ5D5L5_D28, EQ5D5L1_D180:EQ5D5L5_D180)
+
+qol_data_d28 <- qol_data |>
+  filter(Time == "D28") |>
+  select(!Time) |> 
+  pivot_wider(names_from = Dimension, values_from = avg) |> 
+  column_to_rownames(var = "RANDOMIZATION_R1")
+qol_data_d28 <- rbind(rep(5,5) , rep(0,5) , qol_data_d28)
+
+qol_data_d180 <- qol_data |>
+  filter(Time == "D180") |>
+  select(!Time) |> 
+  pivot_wider(names_from = Dimension, values_from = avg) |> 
+  column_to_rownames(var = "RANDOMIZATION_R1")
+qol_data_d180 <- rbind(rep(5,5) , rep(0,5) , qol_data_d180)
+
+
+par(mfrow = c(1, 3))
+
+radarchart(qol_data_d1, caxislabels = rep(1:5), axislabcol = "gray", axistype = 1, cglcol = "gray", cglty = 1, 
+             pcol=colors_border, pfcol=colors_in , plwd=2 , plty=1,
+             vlcex = 1, title = "Day 1")
+
+radarchart(qol_data_d28, caxislabels = rep(1:5), axislabcol = "gray", axistype = 1, cglcol = "gray", cglty = 1, 
+             pcol=colors_border, pfcol=colors_in , plwd=2 , plty=1,
+             vlcex = 1, title = "Day 28")
+legend(x=-1.2, y=1.1, legend = rownames(qol_data_d1[-c(1,2),]), bty = "n", pch=20 , col=colors_border , text.col = "black", cex=0.8, pt.cex=2)
+
+radarchart(qol_data_d180, caxislabels = rep(1:5), axislabcol = "gray", axistype = 1, cglcol = "gray", cglty = 1, 
+             pcol=colors_border, pfcol=colors_in , plwd=2 , plty=1,
+             vlcex = 1, title = "Day 180")
+legend(x=-1.2, y=1.1, legend = rownames(qol_data_d1[-c(1,2),]), bty = "n", pch=20 , col=colors_border , text.col = "black", cex=1, pt.cex=2)
+
+```
+
+```{r QoL2, warning=FALSE}
+continuous <- c("EQ5D5L_SC_D1_V", "EQ5D5L_SC_D28_V", "EQ5D5L_D180_SC_V")
+
+qol_table_data <- covic19.data |> select(RANDOMIZATION_R1, continuous)
+
+qol_table <- tbl_summary(
+  qol_table_data,
+  by = "RANDOMIZATION_R1",
+  type = list(all_continuous() ~ "continuous2",
+              continuous ~ "continuous")
+) |>
+  bold_labels() |>
+  add_difference() |>
+  add_n() |> 
+  modify_column_hide(columns = p.value) |> 
+  modify_caption("**Table 35.** EQ5D")
+
+qol_table
+```
+
+Note: EQ5D VAS, EQ5D Visual analog scale (from 0 = worst to 100 = best)
+
+# 9 Safety analysis
+
+## 9.1 Adverse events
+
+There were **78** adverse events in the plasma arm and **87** in the
+standard of care arm.
+
+```{r}
+
+
+check <- t11_ae_recoded |> filter(!(AENUMGLOBAL %in% c("DE-01-005-AE/SAE-01", "FR-01-002-AE/SAE-01", "DE-05-001-AE/SAE-01")))
+
+table_ae <- t11_ae_recoded |> 
+  filter(!(AENUMGLOBAL %in% c("DE-01-005-AE/SAE-01", "FR-01-002-AE/SAE-01", "DE-05-001-AE/SAE-01"))) |> # Duplicate or no data at all on event
+  select(AENUMGLOBAL, RANDOMIZATION_R1, AESER, AEREL, AEOUT_C1:AEOUT_C6, AETERM_CTCAE_recoded) |> 
+  mutate(AERELYN = if_else(AEREL >= 2, 1, 0),
+         AEOUT_C3 = as.numeric(AEOUT_C3),
+         across(AEOUT_C1:AEOUT_C6, ~replace_na(., 0)),
+         AEOUT_C6 = case_when(
+           if_all(AEOUT_C1:AEOUT_C5, ~ . == 0) ~ 1,
+           if_any(AEOUT_C1:AEOUT_C5, ~ . == 1) ~ 0,
+                  .default = AEOUT_C6
+           ),
+         AEOUT_C3 = factor(AEOUT_C3, levels = c(0,1))
+         ) |> 
+  set_variable_labels(AESER = "Serious adverse event",
+                      AERELYN = "Related to intervention",
+                      AEOUT_C1 = "Resolved or back to previous status",
+                      AEOUT_C2 = "Improvement",
+                      AEOUT_C3 = "Worsening",
+                      AEOUT_C4 = "Not recovered or stable",
+                      AEOUT_C5 = "Fatal",
+                      AEOUT_C6 = "Unknown",
+                      AETERM_CTCAE_recoded = "CTCAE Terminology") |> 
+  select(RANDOMIZATION_R1, AESER, AERELYN, AEOUT_C1:AEOUT_C6, AETERM_CTCAE_recoded) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"),
+              value = AEOUT_C3 ~ 1) |> 
+    modify_caption("**Table 36.** Adverse events") 
+table_ae
+```
+
+Note: patient DE-14-001, enrolled in error and excluded from the
+analyses, but included in the safety analysis, experienced 2 SAEs
+(really the same event) that were both marked as fatal.
+
+## 9.2 Focus on serious events
+
+```{r}
+table_sae <- t11_ae_recoded |> 
+  filter(AESER == 1) |> 
+  select(AENUMGLOBAL, RANDOMIZATION_R1, AEREL, AEOUT_C1:AEOUT_C6, AETERM_CTCAE_recoded) |>
+  mutate(AERELYN = if_else(AEREL >= 2, 1, 0)) |> 
+  mutate(across(AEOUT_C1:AEOUT_C6, ~replace_na(., 0))) |> 
+  set_variable_labels(AERELYN = "Related to intervention",
+                      AEOUT_C1 = "resolved or back to previous status",
+                      AEOUT_C2 = "improvement",
+                      AEOUT_C3 = "worsening",
+                      AEOUT_C4 = "not recovered or stable",
+                      AEOUT_C5 = "fatal",
+                      AEOUT_C6 = "unknown",
+                      AETERM_CTCAE_recoded = "CTCAE Terminology") |> 
+  select(RANDOMIZATION_R1, AERELYN, AEOUT_C1:AEOUT_C6, AETERM_CTCAE_recoded) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |> 
+  modify_caption("**Table 37.** Serious adverse events") 
+table_sae
+```
+
+## 9.3 Listing of SAEs
+
+```{r}
+table_sae_a <- t11_ae_recoded |> select(AENUMGLOBAL, RANDOMIZATION_R1, AETERM_CTCAE_recoded, AETERM, AEREL, AESER, AEOUT_C5) |>
+  rename("Arm" = RANDOMIZATION_R1,
+         "CTCAE terminology" = AETERM_CTCAE_recoded,
+         "Description" = AETERM,
+         "Relatedness" = AEREL,
+         "Fatal" = AEOUT_C5) |> 
+  filter(AESER == 1, Arm == "plasma") |> 
+  select(!AESER) |> 
+  gt(caption = "Serious adverse events in plasma arm")
+table_sae_a
+
+table_sae_b <- t11_ae_recoded |> select(AENUMGLOBAL, RANDOMIZATION_R1, AETERM_CTCAE_recoded, AETERM, AEREL, AESER, AEOUT_C5) |>
+  rename("Arm" = RANDOMIZATION_R1,
+         "CTCAE terminology" = AETERM_CTCAE_recoded,
+         "Description" = AETERM,
+         "Relatedness" = AEREL,
+         "Fatal" = AEOUT_C5) |> 
+  filter(AESER == 1, Arm == "standard") |> 
+  select(!AESER) |> 
+  gt(caption = "**Table 38.** Serious adverse events in standard arm")
+table_sae_b
+
+
+test <- t11_ae_recoded |> filter(AEOUT_C5 == 1)
+test2 <- covic19.data |> filter(SUBJECT_REF %in% c("DE-14-001","DE-04-057", "DE-09-002")) |> select(SUBJECT_REF, EOS_NCOMPLETED)
+
+```
+
+Note: Relatedness [0] Not related [1] unlikely related [2] possibly
+related [3] probably related [4] definitely related. Fatal marked '1' if
+SAE was fatal. Please note that events DE-14-001-AE/SAE-02 and
+DE-14-001-AE/SAE-03 are both marked fatal but are the same event.
+
+## 9.4 Focus on COVID infections
+
+```{r}
+table_ae_covid <- t11_ae_recoded |> 
+  filter(AETERM_CTCAE_recoded == "Covid-19 infection") |> 
+  select(AENUMGLOBAL, RANDOMIZATION_R1, AEINCDAT, AESTDAT, AETERM, AESER, AEREL, AEOUT_C5) |>
+  mutate(AETIME = as.Date(AESTDAT, format = "%d/%m/%Y") - as.Date(AEINCDAT, format = "%d/%m/%Y")) |> 
+  arrange(AENUMGLOBAL) |> 
+  rename("Arm" = RANDOMIZATION_R1,
+         "Description" = AETERM,
+         "Relatedness" = AEREL,
+         "Serious" = AESER,
+         "Fatal" = AEOUT_C5,
+         "Enrolment date" = AEINCDAT,
+         "AE date" = AESTDAT,
+         "Time from enrolment in days" = AETIME) |> 
+  gt(caption = "**Table 39.** Covid-19 infection adverse events")
+table_ae_covid
+```
+
+Note: event FR-02-002-AE/SAE-03 was considered an occurence of the
+primary endpoint.
+
+## 9.5 Adverse events per patient
+
+```{r}
+table_ae_pat <- t11_ae_recoded |> 
+  select(SUBJECT_REF, AENUMGLOBAL, AETERM_CTCAE_recoded, AETERM, AESER, AEREL) |>
+  mutate(AERELYN = if_else(AEREL >= 2, 1, 0)) |> 
+  group_by(SUBJECT_REF) |> 
+  summarise(n_AE = n(),
+            n_SAE = sum(AESER, na.rm = TRUE),
+            n_SAE = sum(AESER, na.rm = TRUE),
+            n_AER = sum(AERELYN, na.rm = TRUE),
+            n_SAER = sum(AERELYN[AESER == 1], na.rm = TRUE) ) |> 
+  mutate(any_AE = if_else(n_AE >= 1, 1, 0), any_SAE = if_else(n_SAE >= 1, 1, 0)) |> 
+  relocate(any_AE, n_AE, n_AER, any_SAE, n_SAE, n_SAER) |> 
+  right_join(safety_pop, by = "SUBJECT_REF") |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  set_variable_labels(any_AE = "Patient w/ adverse event",
+                      n_AE = "Number adverse events per patient",
+                      any_SAE = "Serious adverse events per patient",
+                      n_SAE = "Number serious adverse events per patient",
+                      n_AER = "Number related adverse events per patient",
+                      n_SAER = "Number related SAE per patient") |> 
+  select(!SUBJECT_REF) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = list(n_AE ~ "continuous2",
+                          n_SAE ~ "continuous2",
+                          any_AE ~ "dichotomous",
+                          any_SAE ~ "dichotomous"),
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |> 
+  modify_caption("**Table 38.** Patients with adverse events") 
+table_ae_pat
+```
+
+# 10 Appendices
+
+## Appendix 1. Distribution of variants in the centers
+
+```{r}
+table_variants_centers_a <- covic19.data |> select(SITE_ID, D1_PCRASSTYP1, D1_PCRASSTYP2) |> 
+  tbl_summary(by = SITE_ID,
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})","{min}, {max}"),
+                               all_categorical() ~ "{n}")) |>
+  bold_labels()
+table_variants_centers_b <- covic19.data |> filter(D1_PCRASSTYP1 == "Omicron B.1.1.529") |> select(SITE_ID, OMICRONTYP, D1_PCRASSTYP2) |> 
+  tbl_summary(by = SITE_ID,
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})","{min}, {max}"),
+                               all_categorical() ~ "{n} / {N_nonmiss}")) |>
+  bold_labels()
+
+table_variants_centers <- tbl_stack(list(table_variants_centers_a, table_variants_centers_b), quiet = TRUE)
+table_variants_centers
+
+```
+
+## Appendix 2. Other comorbidities
+
+```{r}
+
+table14.data <- covic19.data |> select(RANDOMIZATION_R1, MH_OTHER_TXT)
+
+table14<- table14.data |>
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = c(all_continuous() ~ "continuous2"),
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})","{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |>
+  bold_labels() |> 
+  modify_caption("**Table 14.** List of other comorbidities")
+
+table14
+```
+
+## Appendix 3. Concomitant medications in transplant patients
+
+```{r}
+transplant_patients <- covic19.data |> mutate(pat_cat = case_when(IN07A5 == 1 & IN07A6 == 1 ~ "Organ transplant with Anti B MoAb or MMF",
+                                                                  IN07A5 == 1 ~ "Organ transplant",
+                                                                  .default = "Other")
+                                              )
+transplant_patients <- transplant_patients |> select(SUBJECT_REF, pat_cat)
+
+table_15 <- t9_cmtab |> select(SUBJECT_REF, `Medication class`) |>
+  filter(!is.na(`Medication class`)) |> 
+  unique() |> 
+  dplyr::count(SUBJECT_REF, `Medication class`) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = `Medication class`, values_from = n, values_fill = 0) |> 
+  merge(transplant_patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  tbl_summary(by = pat_cat,
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |> 
+  modify_caption("**Table 15.** Medication classes and patient category")
+table_15
+```
+
+## Appendix 4. Detailed concomitant medications
+
+```{r concomitant medication, warning=FALSE}
+table_16 <- t9_cmtab |> select(SUBJECT_REF, Medication) |>
+  filter(!is.na(Medication)) |>  
+  unique() |> 
+  dplyr::count(SUBJECT_REF, Medication, sort = TRUE) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)"))
+table_16
+```
+
+## Appendix 5. Followup
+
+```{r followup, warning=FALSE}
+table_fu.data <- covic19.data |> select(RANDOMIZATION_R1, days_rando_followup)
+
+table_fu <- table_fu.data |>
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |>
+  bold_labels()
+
+table_fu
+
+c <- ggplot(table_fu.data, aes(days_rando_followup))
+c + geom_histogram(binwidth = 5)
+
+```
+
+# Responses to eBioMedicine reviewers
+
+## Immunosuppressive drugs in transplant patients
+
+```{r}
+transplant_patients <- covic19.data |> 
+  filter(IN07A5 == 1) |> 
+  select(SUBJECT_REF, RANDOMIZATION_R1)
+
+table_17 <- t9_cmtab |> select(SUBJECT_REF, RANDOMIZATION_R1, `Medication class`, Medication) |>
+  filter(`Medication class` == "Immunosuppressive agents") |> 
+  unique() |> 
+  dplyr::count(SUBJECT_REF, Medication) |> 
+  pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  merge(transplant_patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  select(!SUBJECT_REF) |> 
+  mutate(across(everything(), ~replace_na(., 0))) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = all_continuous() ~ "continuous2",
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |> 
+  modify_caption("Immunosuppressive drugs in transplant patients")
+table_17
+```
+
+## Immunosuppressive agents in transplant patients before and after COVID-19
+
+```{r}
+transplant_patients <- covic19.data |> 
+  filter(IN07A5 == 1) |> 
+  select(SUBJECT_REF)
+
+table_18 <- t9_cmtab |> 
+  filter(`Medication class` == "Immunosuppressive agents" ) |> 
+  mutate(dose_mg = if_else(COVID19_CMUNIT == 2, COVID19_CMDOSE_V * 1000, COVID19_CMDOSE_V)) |> 
+  select(Medication, classification_trt, dose_mg) |> 
+  complete(Medication, classification_trt) |> 
+  
+# summary(as.factor(table_18$classification_trt))
+
+    tbl_strata2(
+    strata = classification_trt,
+    .tbl_fun = 
+      ~ .x |> 
+      tbl_summary(by = Medication, missing = "no",
+              type = c(all_continuous() ~ "continuous", dose_mg ~ "continuous"), 
+              statistic = list(all_continuous() ~ "{mean}, {median} ({p25}, {p75})",
+                               all_categorical() ~ "{n}")
+              ),
+      # modify_header(all_stat_cols() ~ "**{level}**"),
+    .combine_with = "tbl_stack"
+        ) |> 
+  modify_caption("Immunosuppressive agents and doses in transplant patients before and after enrollment")
+table_18
+  # pivot_wider(id_cols = SUBJECT_REF, names_from = Medication, values_from = n, values_fill = 0) |> 
+  # merge(transplant_patients, by = "SUBJECT_REF", all.y = TRUE) |> 
+  # select(!SUBJECT_REF) |> 
+  # mutate(across(everything(), ~replace_na(., 0))) |> 
+  
+```
+
+## Description of COVID-19 treatment time relative to CCP infusion
+
+```{r}
+table19 <- t9_cmtab2 |>
+  filter(`Medication class` %in%  c("COVID-19 monoclonal antibodies", "COVID-19 antivirals") & RANDOMIZATION_R1 == "plasma") |> 
+  select(SUBJECT_REF, Medication, delai_trt_ccp) |> 
+  group_by(SUBJECT_REF, Medication) |> 
+  summarise(delai_trt_ccp = min(delai_trt_ccp)) |> 
+  ungroup() |> 
+  # mutate(delai_trt_ccp = ordered(delai_trt_ccp)) |>
+  select(Medication, delai_trt_ccp) |> 
+  tbl_strata(
+    strata = Medication,
+    .tbl_fun =
+      ~ .x |>
+      tbl_summary(
+        label = delai_trt_ccp ~ "Time relative to CCP (days)",
+        type = all_continuous() ~ "continuous2",
+        statistic = list(
+          all_continuous() ~ c("{median} ({p25}, {p75})", "{min}, {max}"),
+          all_categorical() ~ "{n}"
+        ))) |>
+      modify_caption("Time of COVID-19 medications relative to CCP infusion (treatment initiation)")
+
+table19
+```
+
+## Time from symptom onset to CCP transfusion in plasma group
+
+```{r, fig.height=3, fig.width=3, warning=FALSE, dpi=300}
+c <- ggplot(covic19.data, aes(days_cov_plasma)) +
+  geom_bar() +
+  theme_minimal() +
+  scale_x_continuous(breaks = 0:7) +
+  labs(x = "Time from symptom onset to \nCCP infusion (days)",
+       y = "Number patients")
+c
+```
+
+## Fragility index
+
+```{r}
+covic19 <- matrix(c(5, 53, 0, 59), nrow = 2,
+                  dimnames =
+                    list(
+                      c("Event", "No event"),
+                      c("Standard", "CCP")
+                         )
+                  )
+covic19
+fisher.test(covic19, alternative = "two.sided")
+
+# Adding 1 event in CCP
+covic19 <- matrix(c(5, 53, 1, 58), nrow = 2,
+                  dimnames =
+                    list(
+                      c("Event", "No event"),
+                      c("Standard", "CCP")
+                         )
+                  )
+covic19
+fisher.test(covic19, alternative = "two.sided")
+```
+
+## Day 14 Laboratory assessments
+
+```{r}
+table_d14 <-
+  covic19.data |> select(
+    RANDOMIZATION_R1,
+    D14_CREAT_V,
+    D14_ALT_V,
+    D14_AST_V,
+    D14_CA_V,
+    D14_PHOS_V,
+    D14_GLUC_V,
+    D14_UREA_V,
+    D14_CRP_V,
+    D14_LDH_V,
+    D14_DDIMER_V,
+    D14_FERRITIN_V,
+    D14_NA_V,
+    D14_K_V,
+    D14_CL_V,
+    D14_HCO3_V,
+    D14_IL6_V,
+    D14_WBC_V,
+    D14_LYMCE_V,
+    D14_LYMCEPC_V,
+    D14_NEUT_V,
+    D14_NEUTPC_V,
+    D14_LNR_V,
+    D14_HGB_V,
+    D14_PLAT_V,
+    D14_APTT_V,
+    D14_FIBRINOGEN_V,
+    D14_INR_V,
+    D14_IGAASS,
+    D14_IGAASSRATIO_V,
+    D14_IGGASS,
+    D14_IGGASSRATIO_V
+  ) |> 
+  tbl_summary(by = "RANDOMIZATION_R1",
+              type = c(all_continuous() ~ "continuous2",
+                         D14_NEUTPC_V ~ "continuous2"),
+              statistic = list(all_continuous() ~ c("{median} ({p25}, {p75})",
+                                                    "{min}, {max}"),
+                               all_categorical() ~ "{n} ({p}%)")) |> 
+  bold_labels() |> 
+  modify_caption("Day 14 Laboratory assessments")
+    
+table_d14
+```
